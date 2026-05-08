@@ -6,6 +6,7 @@ import PresetSelector from '../components/PresetSelector';
 import AudioPreview from '../components/AudioPreview';
 import ProcessingStatus from '../components/ProcessingStatus';
 import { PRESETS, type Preset } from '../lib/presets';
+import { APP_VERSION } from '../lib/version';
 
 export default function Home() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -42,7 +43,10 @@ export default function Home() {
           <div className="flex items-center gap-3">
             <span className="text-4xl">🎻</span>
             <div>
-              <h1 className="text-2xl font-bold">Violin Polisher</h1>
+              <h1 className="text-2xl font-bold flex items-baseline gap-2">
+                Violin Polisher
+                <span className="text-xs opacity-40 font-normal tabular-nums">v{APP_VERSION}</span>
+              </h1>
               <p className="text-sm opacity-60">Transform raw pickup recordings into polished audio</p>
             </div>
           </div>
