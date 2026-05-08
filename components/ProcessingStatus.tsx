@@ -1,12 +1,12 @@
 'use client';
 
-import React, { useState, useRef, useEffect } from 'react';
-import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile, toBlobURL } from '@ffmpeg/util';
+import React, { useState, useRef } from 'react';
+import type { FFmpeg } from '@ffmpeg/ffmpeg';
+type FetchFileFn = (file?: string | File | Blob) => Promise<Uint8Array>;
 import type { Preset } from '../lib/presets';
 import { buildFFmpegCommand } from '../lib/audio-helpers';
 
-const CDN_BASE = 'https://unpkg.com/@ffmpeg/core-mt@0.12.10/dist/esm';
+const STATIC_BASE = '/ffmpeg';
 
 interface ProcessingStatusProps {
   preset: Preset;
@@ -16,85 +16,97 @@ interface ProcessingStatusProps {
   onError: (error: string) => void;
 }
 
-type Phase = 'loading' | 'init' | 'processing' | 'finalizing' | 'complete' | 'error' | 'idle';
+type Phase = 'init' | 'loading' | 'processing' | 'finalizing' | 'complete' | 'error' | 'idle';
 
-export default function ProcessingStatus({ preset, inputFile, format, onComplete, onError }: ProcessingStatusProps) {
+// Lazy-loaded FFmpeg instance and helpers (avoids Turbopack build-time analysis)
+type FFMpegModules = {
+  ffmpeg: FFmpeg;
+  fetchFile: FetchFileFn;
+};
+
+let cachedModules: FFMpegModules | null = null;
+
+async function loadFFmpeg(onProgress?: (msg: string) => void): Promise<FFMpegModules> {
+  if (cachedModules) return cachedModules;
+
+  if (onProgress) onProgress('Loading audio engine (~31 MB)...');
+
+  const { FFmpeg } = await import('@ffmpeg/ffmpeg');
+  const { fetchFile, toBlobURL } = await import('@ffmpeg/util');
+
+  const ffmpeg = new FFmpeg();
+
+  await ffmpeg.load({
+    coreURL: await toBlobURL(`${STATIC_BASE}/ffmpeg-core.js`, 'text/javascript'),
+    wasmURL: await toBlobURL(`${STATIC_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
+    workerURL: await toBlobURL(`${STATIC_BASE}/ffmpeg-core.worker.js`, 'text/javascript'),
+  });
+
+  cachedModules = { ffmpeg, fetchFile };
+  return cachedModules;
+}
+
+export default function ProcessingStatus({
+  preset,
+  inputFile,
+  format,
+  onComplete,
+  onError,
+}: ProcessingStatusProps) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const ffmpegRef = useRef<FFmpeg | null>(null);
-  const loadedRef = useRef(false);
 
-  const loadFFmpeg = async () => {
-    if (loadedRef.current && ffmpegRef.current) return ffmpegRef.current;
-    
-    setPhase('init');
-    setProgress(0);
-    setMessage('Loading audio engine (~31 MB)...');
-    
-    const ffmpeg = new FFmpeg();
-    
-    await ffmpeg.load({
-      coreURL: await toBlobURL(`${CDN_BASE}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${CDN_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
-      workerURL: await toBlobURL(`${CDN_BASE}/ffmpeg-core.worker.js`, 'text/javascript'),
-    });
-    
-    loadedRef.current = true;
-    ffmpegRef.current = ffmpeg;
-    return ffmpeg;
-  };
-
-  const process = async () => {
+  async function process() {
     try {
       setError(null);
+
       setPhase('init');
-      
-      const ffmpeg = await loadFFmpeg();
-      
+      const mods = await loadFFmpeg((msg) => setMessage(msg));
+
       setPhase('loading');
       setProgress(0.2);
       setMessage('Loading audio file...');
-      
+
       const inputExt = inputFile.name.split('.').pop()?.toLowerCase() || 'wav';
       const inputName = `input.${inputExt}`;
       const outputName = `output.${format}`;
-      
-      await ffmpeg.writeFile(inputName, await fetchFile(inputFile));
-      
+
+      await mods.ffmpeg.writeFile(inputName, await mods.fetchFile(inputFile));
+
       setPhase('processing');
       setProgress(0);
       setMessage('Applying enhancements...');
 
       // Progress tracking
-      ffmpeg.on('progress', ({ progress: p }) => {
+      mods.ffmpeg.on('progress', ({ progress: p }) => {
         if (p > 0 && p <= 1) {
           setProgress(p);
           setMessage(`Processing... ${(p * 100).toFixed(0)}%`);
         }
       });
 
-      // Log output for debugging
-      ffmpeg.on('log', ({ message: logMsg }) => {
+      // Log for debugging
+      mods.ffmpeg.on('log', ({ message: logMsg }) => {
         console.log('[ffmpeg]', logMsg);
       });
 
-      // Build and execute filter chain
+      // Build and run
       const args = buildFFmpegCommand(inputName, outputName, preset, format);
       console.log('FFmpeg args:', args.join(' '));
-      
-      await ffmpeg.exec(args, 300000);
+
+      await mods.ffmpeg.exec(args, 300000);
 
       setPhase('finalizing');
       setProgress(0.9);
       setMessage('Finalizing...');
 
-      const outputData = await ffmpeg.readFile(outputName);
-      
+      const outputData = await mods.ffmpeg.readFile(outputName);
+
       // Cleanup
-      try { await ffmpeg.deleteFile(inputName); } catch {}
-      try { await ffmpeg.deleteFile(outputName); } catch {}
+      try { await mods.ffmpeg.deleteFile(inputName); } catch {}
+      try { await mods.ffmpeg.deleteFile(outputName); } catch {}
 
       const buf = outputData as Uint8Array;
       const mimeType = format === 'wav' ? 'audio/wav' : 'audio/mp3';
@@ -104,17 +116,16 @@ export default function ProcessingStatus({ preset, inputFile, format, onComplete
       setPhase('complete');
       setProgress(1);
       setMessage('Done!');
-      
+
       onComplete(blob, url);
-      
-    } catch (err: any) {
-      console.error('Processing error:', err);
-      const errorMsg = err?.message || String(err);
-      setError(errorMsg);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Processing error:', msg);
+      setError(msg);
       setPhase('error');
-      onError(errorMsg);
+      onError(msg);
     }
-  };
+  }
 
   const isRunning = phase !== 'idle' && phase !== 'complete' && phase !== 'error';
 
