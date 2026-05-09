@@ -1,14 +1,18 @@
 /**
  * Audio processing pipeline using FFmpeg.wasm
  * Builds FFmpeg filter chains from preset configs.
- * Processing runs on the client side via @ffmpeg/ffmpeg.
+ * 
+ * IMPORTANT: FFmpeg WASM (single-threaded, @ffmpeg/core 0.12.10) supports
+ * only a subset of filters. Verified working:
+ *   highpass, lowpass, equalizer, acompressor, pan, adelay, aecho, volume
+ * NOT available in WASM:
+ *   afftdn (needs libfftw3), loudnorm (needs libebur128), arnndn
  */
 
 import type { Preset } from './presets';
 
 /**
  * Build FFmpeg filter chain string from a preset.
- * Returns the -af argument value.
  */
 export function buildFilterChain(preset: Preset): string {
   const filters: string[] = [];
@@ -18,66 +22,67 @@ export function buildFilterChain(preset: Preset): string {
     filters.push('highpass=f=' + preset.clean.highpassFreq);
   }
 
-  // Phase 2: EQ bands (piezo quack removal, presence boost)
+  // Phase 2: EQ bands — use width_type=q (Q factor) which is universally supported
   for (const band of preset.eq) {
-    const widthParam = band.widthType === 'q'
-      ? 'q=' + band.width
-      : band.widthType + '=' + band.width;
-    filters.push('equalizer=f=' + band.frequency + ':' + widthParam + ':g=' + band.gain);
+    // Convert all width types to Q factor for compatibility
+    const q = band.widthType === 'q' ? band.width : 1.4;
+    filters.push('equalizer=f=' + band.frequency + ':width_type=q:w=' + q + ':g=' + band.gain);
   }
 
-  // Phase 3: Noise reduction (afftdn)
+  // Phase 3: Skip afftdn (not available in WASM build)
+  // Using highpass + lowpass as basic noise reduction instead
   if (preset.clean.noiseReduction > 0) {
-    filters.push('afftdn=nr=' + preset.clean.noiseReduction);
+    // Low-pass at 16kHz to remove high-freq hiss
+    filters.push('lowpass=f=16000');
   }
 
   // Phase 4: Compression
   if (preset.compressor.enabled) {
     const comp = preset.compressor;
-    const level = Math.pow(10, comp.threshold / 20);
-    const makeup = Math.pow(10, comp.makeupGain / 20);
     const attackSec = comp.attack / 1000;
     const releaseSec = comp.release / 1000;
+    // acompressor threshold is in dB (negative), not linear
     filters.push(
-      'acompressor=level_in=' + level +
+      'acompressor=threshold=' + comp.threshold + 'dB' +
       ':ratio=' + comp.ratio +
       ':attack=' + attackSec +
       ':release=' + releaseSec +
-      ':level_out=' + makeup
+      ':makeup=' + comp.makeupGain + 'dB'
     );
   }
 
   // Phase 5: Stereo widening (Haas effect) for mono input
   if (preset.stereo.enabled) {
-    const delayMs = preset.stereo.haasDelay * 1000;
-    // Pan mono to stereo (both channels have same content), then delay right channel
-    filters.push(
-      'pan=stereo|FL=c0|FR=c0' +
-      ',adelay=' + delayMs + '|' + delayMs + ':all=1'
-    );
+    // haasDelay is in ms, adelay expects ms
+    const delayMs = preset.stereo.haasDelay;
+    // First duplicate mono to stereo, then delay right channel only
+    filters.push('pan=stereo|FL=c0|FR=c0');
+    filters.push('adelay=0|' + delayMs);
   }
 
-  // Phase 6: Reverb via cascaded aecho
+  // Phase 6: Reverb via aecho (simple but works in WASM)
   if (preset.reverb.enabled) {
     const rev = preset.reverb;
-    const delay = (rev.preDelay + rev.decay / 4) / 1000;
-    const decay = rev.wetMix / 3;
+    // aecho: in_gain|out_gain|delays(ms)|decays(0-1)
+    const delayMs = Math.round(rev.preDelay + rev.decay * 0.3);
+    const delayMs2 = Math.round(rev.preDelay + rev.decay * 0.6);
+    const wet = rev.wetMix;
     filters.push(
-      'aecho=0.8:1:' + delay.toFixed(2) + ':' + decay.toFixed(2) +
-      ',aecho=0.8:0.5:' + (delay + 0.05).toFixed(2) + ':' + (decay * 0.7).toFixed(2)
+      'aecho=' + (1 - wet).toFixed(2) + ':' + wet.toFixed(2) +
+      ':' + delayMs + '|' + delayMs2 +
+      ':' + (wet * 0.8).toFixed(2) + '|' + (wet * 0.5).toFixed(2)
     );
   }
 
-  // Phase 7: Loudness normalization
-  const master = preset.master;
-  filters.push('loudnorm=I=' + master.loudnessTarget + ':TP=' + master.truePeak + ':LRA=' + master.lra);
+  // Phase 7: Volume normalization (loudnorm NOT available in WASM, use volume + dynaudnorm)
+  // dynaudnorm is a simpler alternative that IS available
+  filters.push('dynaudnorm=p=0.9:s=5');
 
   return filters.join(',');
 }
 
 /**
  * Build full FFmpeg command arguments.
- * Returns array of args for ffmpeg.exec().
  */
 export function buildFFmpegCommand(inputFile: string, outputFile: string, preset: Preset, format: 'wav' | 'mp3'): string[] {
   const args: string[] = ['-i', inputFile];

@@ -115,7 +115,11 @@ export default function ProcessingStatus({
         if (p > 0 && p <= 1) { setProgress(p); setMessage(`Zpracovávám... ${(p * 100).toFixed(0)} %`); }
       });
 
-      ffmpeg.onLog((m: string) => console.log('[ffmpeg]', m));
+      ffmpeg.onLog((m: string) => {
+        // FFmpeg logger sends objects with {type, message}, not plain strings
+        const text = typeof m === 'object' ? JSON.stringify(m) : String(m);
+        console.log('[ffmpeg]', text);
+      });
 
       setPhase('loading');
       setProgress(0.2);
