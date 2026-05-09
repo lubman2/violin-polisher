@@ -85,8 +85,11 @@ export default function AudioPreview({ originalUrl, processedUrl, originalFile, 
       audio.pause();
       setIsPlaying(false);
     } else {
-      audio.play();
-      setIsPlaying(true);
+      audio.play().catch((e) => {
+        // Browser may reject play() if no user gesture or invalid source
+        console.warn('Audio play failed:', e.message);
+        setIsPlaying(false);
+      });
     }
   };
 

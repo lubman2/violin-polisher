@@ -137,8 +137,8 @@ export default function Home() {
               Náhled
             </h2>
             <AudioPreview
-              originalUrl={fileUrl || ''}
-              processedUrl={processedUrl}
+              originalUrl={fileUrl || ""}
+              processedUrl={processedUrl || ""}
               originalFile={selectedFile}
               processedBlob={processedBlob}
             />
