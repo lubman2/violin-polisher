@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import AudioUpload from '../components/AudioUpload';
 import PresetSelector from '../components/PresetSelector';
+import PresetEditor from '../components/PresetEditor';
 import AudioPreview from '../components/AudioPreview';
 import ProcessingStatus from '../components/ProcessingStatus';
 import { PRESETS, type Preset } from '../lib/presets';
@@ -12,9 +13,16 @@ export default function Home() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [selectedPresetId, setSelectedPresetId] = useState('classical-hall');
+  const [editedPreset, setEditedPreset] = useState<Preset>(PRESETS[0]);
   const [format, setFormat] = useState<'wav' | 'mp3'>('wav');
   const [processedUrl, setProcessedUrl] = useState<string | null>(null);
   const [processedBlob, setProcessedBlob] = useState<Blob | null>(null);
+
+  // When preset selection changes, reset edited preset to the base preset
+  useEffect(() => {
+    const base = PRESETS.find(p => p.id === selectedPresetId) || PRESETS[0];
+    setEditedPreset({ ...base });
+  }, [selectedPresetId]);
 
   const handleFileSelect = useCallback((file: File, url: string) => {
     if (fileUrl) URL.revokeObjectURL(fileUrl);
@@ -32,8 +40,6 @@ export default function Home() {
   const handleProcessingError = useCallback((error: string) => {
     console.error('Chyba zpracování:', error);
   }, []);
-
-  const selectedPreset = PRESETS.find(p => p.id === selectedPresetId) || PRESETS[0];
 
   return (
     <div className="min-h-screen bg-base-200">
@@ -66,7 +72,7 @@ export default function Home() {
           />
         </section>
 
-        {/* Krok 2: Preset */}
+        {/* Krok 2: Preset + Editor */}
         <section className="space-y-3">
           <h2 className="text-xl font-semibold flex items-center gap-2">
             <span className="flex items-center justify-center w-8 h-8 rounded-full bg-primary text-primary-content text-sm font-bold">2</span>
@@ -76,6 +82,10 @@ export default function Home() {
             presets={PRESETS}
             selectedId={selectedPresetId}
             onSelect={setSelectedPresetId}
+          />
+          <PresetEditor
+            preset={editedPreset}
+            onChange={setEditedPreset}
           />
         </section>
 
@@ -87,31 +97,17 @@ export default function Home() {
           </h2>
           <div className="flex gap-3">
             <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="radio"
-                name="format"
-                value="wav"
-                checked={format === 'wav'}
-                onChange={() => setFormat('wav')}
-                className="radio radio-primary"
-              />
+              <input type="radio" name="format" value="wav" checked={format === 'wav'} onChange={() => setFormat('wav')} className="radio radio-primary" />
               <span>WAV (bezeztrátový)</span>
             </label>
             <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="radio"
-                name="format"
-                value="mp3"
-                checked={format === 'mp3'}
-                onChange={() => setFormat('mp3')}
-                className="radio radio-primary"
-              />
+              <input type="radio" name="format" value="mp3" checked={format === 'mp3'} onChange={() => setFormat('mp3')} className="radio radio-primary" />
               <span>MP3 (320 kbps)</span>
             </label>
           </div>
         </section>
 
-        {/* Krok 4: Zpracování */}
+        {/* Krok 4: Zpracování — uses editedPreset, not base preset */}
         {selectedFile && (
           <section className="space-y-3">
             <h2 className="text-xl font-semibold flex items-center gap-2">
@@ -119,8 +115,8 @@ export default function Home() {
               Zpracovat a stáhnout
             </h2>
             <ProcessingStatus
-              key={`${selectedFile.name}-${selectedPresetId}-${format}`}
-              preset={selectedPreset}
+              key={`${selectedFile.name}-${selectedPresetId}-${format}-${JSON.stringify(editedPreset.compressor)}-${JSON.stringify(editedPreset.stereo)}-${JSON.stringify(editedPreset.reverb)}`}
+              preset={editedPreset}
               inputFile={selectedFile}
               format={format}
               onComplete={handleProcessingComplete}
@@ -152,7 +148,7 @@ export default function Home() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
               <div className="space-y-2">
                 <h4 className="font-medium">🧹 Vyčištění</h4>
-                <p className="opacity-70">Odstraní brum, šum a subsonický hluk pomocí AI redukce šumu (RNNoise).</p>
+                <p className="opacity-70">Odstraní brum, šum a subsonický hluk pomocí filtrů.</p>
               </div>
               <div className="space-y-2">
                 <h4 className="font-medium">🎛 Ekvalizace</h4>
@@ -164,7 +160,7 @@ export default function Home() {
               </div>
               <div className="space-y-2">
                 <h4 className="font-medium">🔊 Stereo + Reverb</h4>
-                <p className="opacity-70">Přidá stereo šířku (Haasův efekt) a přirozený hallový reverb pro prostorovou hloubku.</p>
+                <p className="opacity-70">Přidá stereo šířku (Haasův efekt) a přirozený reverb pro prostorovou hloubku.</p>
               </div>
             </div>
             <div className="mt-4 p-3 bg-base-200 rounded-lg">
