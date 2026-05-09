@@ -49,6 +49,8 @@ class FFmpegWorkerClient {
   async exec(args: string[], timeout = -1) { return this.send<number>('EXEC', { args, timeout }); }
   async readFile(path: string): Promise<Uint8Array> { return this.send('READ_FILE', { path, encoding: 'binary' }); }
   async deleteFile(path: string) { try { await this.send<boolean>('DELETE_FILE', { path }); } catch {} }
+  async listFiles() { return this.send('LIST_FILES', {}); }
+  async getLogs() { return this.send('GET_LOGS', {}); }
   terminate() { this.worker.terminate(); }
 }
 
@@ -132,13 +134,27 @@ export default function ProcessingStatus({
       const args = buildFFmpegCommand(inputName, outputName, preset, format);
       console.log('FFmpeg args:', args.join(' '));
 
-      await ffmpeg.exec(args, 300000);
+      // Trace: file listing before exec
+      const beforeFiles = await ffmpeg.listFiles();
+      console.log('[trace] files before exec:', JSON.stringify(beforeFiles));
+
+      const execRet = await ffmpeg.exec(args, 300000);
+      console.log('[trace] exec return code:', execRet);
+
+      // Trace: worker logs
+      const workerLogs = await ffmpeg.getLogs();
+      console.log('[trace] worker logs:', JSON.stringify(workerLogs?.slice?.(-10) ?? workerLogs));
+
+      // Trace: file listing after exec
+      const afterFiles = await ffmpeg.listFiles();
+      console.log('[trace] files after exec:', JSON.stringify(afterFiles));
 
       setPhase('finalizing');
       setProgress(0.9);
       setMessage('Dokončuji...');
 
       const outputData = await ffmpeg.readFile(outputName);
+      console.log('[trace] outputData byteLength:', outputData?.byteLength ?? 'null');
       await ffmpeg.deleteFile(inputName);
       await ffmpeg.deleteFile(outputName);
 
