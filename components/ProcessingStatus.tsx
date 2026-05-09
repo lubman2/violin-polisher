@@ -44,7 +44,7 @@ class FFmpegWorkerClient {
     });
   }
 
-  async load() { return this.send<boolean>('LOAD', { coreURL: '/ffmpeg/ffmpeg-core.js', wasmURL: '/ffmpeg/ffmpeg-core.wasm' }); }
+  async load() { return this.send<boolean>('LOAD', { coreURL: '/ffmpeg/ffmpeg-core.js', wasmURL: 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.wasm' }); }
   async writeFile(path: string, data: Uint8Array) { return this.send<boolean>('WRITE_FILE', { path, data }); }
   async exec(args: string[], timeout = -1) { return this.send<number>('EXEC', { args, timeout }); }
   async readFile(path: string): Promise<Uint8Array> { return this.send('READ_FILE', { path, encoding: 'binary' }); }
