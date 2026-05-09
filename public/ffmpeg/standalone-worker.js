@@ -4,8 +4,8 @@
 
 /**
  * Standalone FFmpeg worker for violin-polisher.
- * Loaded as ES module worker ({ type: 'module' }).
- * Uses dynamic import() to load ffmpeg-core (which needs import.meta).
+ * Loads ffmpeg-core via fetch+blob URL to completely bypass
+ * Next.js/Turbopack bundler interference.
  */
 
 let ffmpeg = null;
@@ -16,12 +16,16 @@ const FFMessageType = {
   LOG: 'LOG', PROGRESS: 'PROGRESS', ERROR: 'ERROR',
 };
 
-self.onmessage = async function ({ data: { id, type, data: _data } }) {
+self.onmessage = async function (ev) {
+  var id = ev.data.id;
+  var type = ev.data.type;
+  var _data = ev.data.data;
+  console.log('[worker] received:', type, id);
   try {
     if (type !== FFMessageType.LOAD && !ffmpeg) {
       throw new Error('ffmpeg not loaded');
     }
-    let result;
+    var result;
 
     switch (type) {
       case FFMessageType.LOAD:
@@ -46,43 +50,49 @@ self.onmessage = async function ({ data: { id, type, data: _data } }) {
     }
 
     if (result instanceof Uint8Array) {
-      self.postMessage({ id, type, data: result }, [result.buffer]);
+      self.postMessage({ id: id, type: type, data: result }, [result.buffer]);
     } else {
-      self.postMessage({ id, type, data: result });
+      self.postMessage({ id: id, type: type, data: result });
     }
   } catch (e) {
-    self.postMessage({ id, type: FFMessageType.ERROR, data: e.message || String(e) });
+    self.postMessage({ id: id, type: 'ERROR', data: e.message || String(e) });
   }
 };
 
 async function loadFFmpegCore(cfg) {
-  var coreURL = cfg.coreURL;
-  var wasmURL = cfg.wasmURL;
+  var corePath = cfg.coreURL;
+  var wasmPath = cfg.wasmURL;
 
   if (ffmpeg) return false;
 
-  // Load ffmpeg-core.js (UMD) — it sets self.createFFmpegCore as side effect
-  await import(/* @vite-ignore */ coreURL);
-  var createFFmpegCore = self.createFFmpegCore;
+  // Step 1: Fetch core JS as text
+  var resp = await fetch(corePath);
+  if (!resp.ok) throw new Error('Failed to fetch ffmpeg-core: HTTP ' + resp.status);
+  var code = await resp.text();
+
+  // Step 2: Create blob URL so browser treats it as proper ESM
+  var blob = new Blob([code], { type: 'text/javascript' });
+  var blobURL = URL.createObjectURL(blob);
+
+  // Step 3: Import the blob URL (fully independent from Next.js bundler)
+  var module = await import(blobURL);
+  var createFFmpegCore = module.default;
+  URL.revokeObjectURL(blobURL);
 
   if (!createFFmpegCore) {
     throw new Error('Failed to load ffmpeg-core: createFFmpegCore not found');
   }
 
-  if (!wasmURL) {
-    wasmURL = coreURL.replace(/\.js$/, '.wasm');
-  }
-
   ffmpeg = await createFFmpegCore({
-    mainScriptUrlOrBlob: coreURL + '#' + btoa(JSON.stringify({ wasmURL: wasmURL })),
+    mainScriptUrlOrBlob: corePath + '#' + btoa(JSON.stringify({ wasmURL: wasmPath })),
   });
 
-  // Register callbacks for log/progress
+  // Register callbacks
   ffmpeg.setLogger(function (data) {
-    self.postMessage({ type: FFMessageType.LOG, data: data });
+    self.postMessage({ type: 'LOG', data: data });
   });
   ffmpeg.setProgress(function (data) {
-    self.postMessage({ type: FFMessageType.PROGRESS, data: data });
+    self.postMessage({ type: 'PROGRESS', data: data });
   });
 
   return true;
