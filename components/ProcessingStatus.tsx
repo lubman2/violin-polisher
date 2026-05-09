@@ -4,35 +4,13 @@ import React, { useState, useRef, useCallback } from 'react';
 import type { Preset } from '../lib/presets';
 import { buildFFmpegCommand } from '../lib/audio-helpers';
 
-// FFmpeg loaded at runtime from CDN — avoids Turbopack bundling entirely.
-// We use single-threaded @ffmpeg/core (no worker needed).
-declare global {
-  interface Window {
-    FFmpegWASM: {
-      FFmpeg: new () => FFmpegInstance;
-    };
-    FFmpegUtil: {
-      fetchFile: (file: string | File | Blob) => Promise<Uint8Array>;
-      toBlobURL: (url: string, mimeType: string) => Promise<string>;
-    };
-  }
-}
-
-interface FFmpegInstance {
-  load: (config: { coreURL: string; wasmURL: string }) => Promise<void>;
-  writeFile: (path: string, data: Uint8Array) => Promise<void>;
-  readFile: (path: string) => Promise<Uint8Array>;
-  exec: (args: string[], timeout?: number) => Promise<number>;
-  deleteFile: (path: string) => Promise<void>;
-  on: (event: string, cb: (data: any) => void) => void;
-}
-
-// ESM CDN URLs — proper ES modules where import.meta.url works correctly
-const FFMPEG_CDN = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/+esm';
-const FFMPEG_UTIL_CDN = 'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.2/+esm';
-const CORE_CDN = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
+// Direct WebWorker communication — no @ffmpeg/ffmpeg npm package needed.
+// The worker is loaded from /ffmpeg/standalone-worker.js (same origin).
 
 type Phase = 'init' | 'loading' | 'processing' | 'finalizing' | 'complete' | 'error' | 'idle';
+
+const FFMPEG_CORE = '/ffmpeg/ffmpeg-core.js';
+const FFMPEG_WASM = '/ffmpeg/ffmpeg-core.wasm';
 
 interface ProcessingStatusProps {
   preset: Preset;
@@ -40,6 +18,84 @@ interface ProcessingStatusProps {
   format: 'wav' | 'mp3';
   onComplete: (blob: Blob, url: string) => void;
   onError: (error: string) => void;
+}
+
+/**
+ * Simple message-based FFmpeg worker wrapper.
+ * Each message has an incrementing ID so we can match responses.
+ */
+class FFmpegWorkerClient {
+  private worker: Worker;
+  private nextId = 0;
+  private listeners = new Map<number, (data: any, error?: string) => void>();
+  private logCallback: ((msg: string) => void) | null = null;
+  private progressCallback: ((p: number) => void) | null = null;
+
+  constructor(workerPath: string) {
+    this.worker = new Worker(workerPath, { type: 'classic' });
+    this.worker.onmessage = ({ data }) => {
+      const { id, type, data: result } = data;
+      if (type === 'LOG') {
+        this.logCallback?.(result);
+        return;
+      }
+      if (type === 'PROGRESS') {
+        this.progressCallback?.(result?.progress ?? 0);
+        return;
+      }
+      if (type === 'ERROR') {
+        const handler = this.listeners.get(id);
+        if (handler) handler(null, data.data || 'Unknown error');
+        return;
+      }
+      const handler = this.listeners.get(id);
+      if (handler) handler(result ?? data);
+    };
+  }
+
+  onLog(cb: (msg: string) => void) { this.logCallback = cb; }
+  onProgress(cb: (p: number) => void) { this.progressCallback = cb; }
+
+  private send<T>(type: string, data: unknown): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const id = this.nextId++;
+      const timeout = setTimeout(() => {
+        this.listeners.delete(id);
+        reject(new Error(`FFmpeg worker timeout for ${type}`));
+      }, 300000);
+      this.listeners.set(id, (result, error) => {
+        clearTimeout(timeout);
+        this.listeners.delete(id);
+        if (error) reject(new Error(error));
+        else resolve(result as T);
+      });
+      this.worker.postMessage({ id, type, data });
+    });
+  }
+
+  async load() {
+    return this.send<boolean>('LOAD', { coreURL: FFMPEG_CORE, wasmURL: FFMPEG_WASM });
+  }
+
+  async writeFile(path: string, data: Uint8Array) {
+    return this.send<boolean>('WRITE_FILE', { path, data });
+  }
+
+  async exec(args: string[], timeout = -1) {
+    return this.send<number>('EXEC', { args, timeout });
+  }
+
+  async readFile(path: string): Promise<Uint8Array> {
+    return this.send('READ_FILE', { path, encoding: 'binary' });
+  }
+
+  async deleteFile(path: string) {
+    try { await this.send('DELETE_FILE', { path }); } catch {}
+  }
+
+  terminate() {
+    this.worker.terminate();
+  }
 }
 
 export default function ProcessingStatus({
@@ -53,36 +109,25 @@ export default function ProcessingStatus({
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const ffmpegRef = useRef<FFmpegInstance | null>(null);
+  const ffmpegRef = useRef<FFmpegWorkerClient | null>(null);
   const loadedRef = useRef(false);
 
   const loadFFmpeg = useCallback(async () => {
-    if (loadedRef.current && ffmpegRef.current) {
-      return { ffmpeg: ffmpegRef.current, fetchFile: window.FFmpegUtil?.fetchFile };
-    }
+    if (loadedRef.current && ffmpegRef.current) return ffmpegRef.current;
 
     setPhase('init');
     setProgress(0);
     setMessage('Loading audio engine (~31 MB)...');
 
-    const FFmpegClass = window.FFmpegWASM?.FFmpeg;
-    const utilFetchFile = window.FFmpegUtil?.fetchFile;
-    const utilToBlobURL = window.FFmpegUtil?.toBlobURL;
-
-    if (!FFmpegClass || !utilFetchFile || !utilToBlobURL) {
-      throw new Error('FFmpeg not loaded from CDN. Check network and COOP/COEP headers.');
+    try {
+      const client = new FFmpegWorkerClient('/ffmpeg/standalone-worker.js');
+      await client.load();
+      loadedRef.current = true;
+      ffmpegRef.current = client;
+      return client;
+    } catch (e: unknown) {
+      throw new Error(e instanceof Error ? e.message : 'Failed to load FFmpeg worker');
     }
-
-    const ffmpeg = new FFmpegClass();
-
-    await ffmpeg.load({
-      coreURL: await utilToBlobURL(`${CORE_CDN}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await utilToBlobURL(`${CORE_CDN}/ffmpeg-core.wasm`, 'application/wasm'),
-    });
-
-    loadedRef.current = true;
-    ffmpegRef.current = ffmpeg;
-    return { ffmpeg, fetchFile: utilFetchFile };
   }, []);
 
   const process = useCallback(async () => {
@@ -90,7 +135,19 @@ export default function ProcessingStatus({
       setError(null);
       setPhase('init');
 
-      const { ffmpeg, fetchFile } = await loadFFmpeg();
+      const ffmpeg = await loadFFmpeg();
+
+      // Register callbacks for progress/logging
+      ffmpeg.onProgress((p: number) => {
+        if (p > 0 && p <= 1) {
+          setProgress(p);
+          setMessage(`Processing... ${(p * 100).toFixed(0)}%`);
+        }
+      });
+
+      ffmpeg.onLog((logMsg: string) => {
+        console.log('[ffmpeg]', logMsg);
+      });
 
       setPhase('loading');
       setProgress(0.2);
@@ -100,22 +157,14 @@ export default function ProcessingStatus({
       const inputName = `input.${inputExt}`;
       const outputName = `output.${format}`;
 
-      await ffmpeg.writeFile(inputName, await fetchFile(inputFile));
+      // Read file as ArrayBuffer and convert to Uint8Array
+      const arrayBuffer = await inputFile.arrayBuffer();
+      const fileData = new Uint8Array(arrayBuffer);
+      await ffmpeg.writeFile(inputName, fileData);
 
       setPhase('processing');
       setProgress(0);
       setMessage('Applying enhancements...');
-
-      ffmpeg.on('progress', ({ progress: p }: { progress: number }) => {
-        if (p > 0 && p <= 1) {
-          setProgress(p);
-          setMessage(`Processing... ${(p * 100).toFixed(0)}%`);
-        }
-      });
-
-      ffmpeg.on('log', ({ message: logMsg }: { message: string }) => {
-        console.log('[ffmpeg]', logMsg);
-      });
 
       const args = buildFFmpegCommand(inputName, outputName, preset, format);
       console.log('FFmpeg args:', args.join(' '));
@@ -128,12 +177,11 @@ export default function ProcessingStatus({
 
       const outputData = await ffmpeg.readFile(outputName);
 
-      try { await ffmpeg.deleteFile(inputName); } catch {}
-      try { await ffmpeg.deleteFile(outputName); } catch {}
+      await ffmpeg.deleteFile(inputName);
+      await ffmpeg.deleteFile(outputName);
 
-      const buf = outputData as Uint8Array;
       const mimeType = format === 'wav' ? 'audio/wav' : 'audio/mp3';
-      const blob = new Blob([new Uint8Array(buf)], { type: mimeType });
+      const blob = new Blob([new Uint8Array(outputData)], { type: mimeType });
       const url = URL.createObjectURL(blob);
 
       setPhase('complete');
@@ -187,7 +235,7 @@ export default function ProcessingStatus({
               <details className="mt-2">
                 <summary className="text-xs opacity-60 cursor-pointer hover:opacity-100">Details</summary>
                 <p className="mt-1 text-xs opacity-50">
-                  FFmpeg is loaded from CDN at runtime. Check the browser console for errors.
+                  Open browser console for more details.
                 </p>
               </details>
             </div>
