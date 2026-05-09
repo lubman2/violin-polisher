@@ -18,118 +18,149 @@ export default function AudioPreview({ originalUrl, processedUrl, originalFile, 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [compareLabel, setCompareLabel] = useState<'A' | 'B'>('A');
-  const compareTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isPlayingRef = useRef(false); // stable ref for async callbacks
+  const [compareSource, setCompareSource] = useState<'A' | 'B'>('A');
+  const compareTimerRef = useRef<number | null>(null);
 
-  // Keep ref in sync with state
-  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+  const hasProcessed = !!processedUrl;
 
-  // Stop everything helper
-  const stopAll = useCallback(() => {
+  // ─── helpers ──────────────────────────────
+
+  const pauseAll = useCallback(() => {
     originalRef.current?.pause();
     processedRef.current?.pause();
-    if (compareTimerRef.current) { clearTimeout(compareTimerRef.current); compareTimerRef.current = null; }
-    setIsPlaying(false);
+    if (compareTimerRef.current) {
+      clearTimeout(compareTimerRef.current);
+      compareTimerRef.current = null;
+    }
   }, []);
 
-  // Track time & duration from original audio
+  const safePlay = useCallback((audio: HTMLAudioElement): Promise<boolean> => {
+    return audio.play().then(() => true).catch(e => {
+      console.warn('[player] play failed:', e.message);
+      return false;
+    });
+  }, []);
+
+  // ─── time tracking ────────────────────────
+
   useEffect(() => {
-    const audio = originalRef.current;
-    if (!audio || !originalUrl) return;
-    const onTime = () => setCurrentTime(audio.currentTime);
-    const onMeta = () => setDuration(audio.duration);
-    const onEnd = () => stopAll();
-    audio.addEventListener('timeupdate', onTime);
-    audio.addEventListener('loadedmetadata', onMeta);
-    audio.addEventListener('ended', onEnd);
-    return () => { audio.removeEventListener('timeupdate', onTime); audio.removeEventListener('loadedmetadata', onMeta); audio.removeEventListener('ended', onEnd); };
-  }, [originalUrl, stopAll]);
+    const orig = originalRef.current;
+    if (!orig || !originalUrl) return;
+    const handleMeta = () => setDuration(orig.duration);
+    orig.addEventListener('loadedmetadata', handleMeta);
+    return () => orig.removeEventListener('loadedmetadata', handleMeta);
+  }, [originalUrl]);
 
-  // Also track from processed if active
   useEffect(() => {
-    const audio = processedRef.current;
-    if (!audio || !processedUrl) return;
-    const onTime = () => { if (playMode === 'processed' || playMode === 'compare') setCurrentTime(audio.currentTime); };
-    const onMeta = () => { if (playMode === 'processed') setDuration(audio.duration); };
-    const onEnd = () => stopAll();
-    audio.addEventListener('timeupdate', onTime);
-    audio.addEventListener('loadedmetadata', onMeta);
-    audio.addEventListener('ended', onEnd);
-    return () => { audio.removeEventListener('timeupdate', onTime); audio.removeEventListener('loadedmetadata', onMeta); audio.removeEventListener('ended', onEnd); };
-  }, [processedUrl, playMode, stopAll]);
+    // Interval-based time tracking (simpler than event-based, works for all modes)
+    const id = setInterval(() => {
+      if (playMode === 'compare') {
+        const src = compareSource === 'A' ? originalRef.current : processedRef.current;
+        if (src && !src.paused) setCurrentTime(src.currentTime);
+      } else {
+        const src = playMode === 'processed' ? processedRef.current : originalRef.current;
+        if (src) setCurrentTime(src.currentTime);
+      }
+    }, 100);
+    return () => clearInterval(id);
+  }, [playMode, compareSource]);
 
-  // Stop on mode change
-  useEffect(() => { stopAll(); }, [playMode, stopAll]);
+  // ─── stop on mode change ──────────────────
 
-  // A/B compare engine
-  const startCompare = useCallback(() => {
-    if (!originalRef.current || !processedRef.current) return;
+  useEffect(() => {
+    pauseAll();
+    setIsPlaying(false);
+  }, [playMode, pauseAll]);
 
-    // Reset to beginning if at end
+  // ─── A/B compare loop ─────────────────────
+
+  useEffect(() => {
+    // This effect runs the A/B alternation loop
+    if (playMode !== 'compare' || !isPlaying) return;
+
     const orig = originalRef.current;
     const proc = processedRef.current;
-    let startPos = orig.currentTime;
-    if (startPos >= orig.duration - 0.1) startPos = 0;
+    if (!orig || !proc) return;
 
-    orig.currentTime = startPos;
-    proc.currentTime = startPos;
-    setCurrentTime(startPos);
-    setIsPlaying(true);
+    let currentlyA = true;
+    setCompareSource('A');
 
-    let playingA = true;
-    setCompareLabel('A');
+    const runSegment = async () => {
+      const playing = currentlyA ? orig : proc;
+      const pausing = currentlyA ? proc : orig;
 
-    const playNext = () => {
-      if (!isPlayingRef.current) return;
-      const toPlay = playingA ? originalRef.current : processedRef.current;
-      const toPause = playingA ? processedRef.current : originalRef.current;
-      if (!toPlay || !toPause) return;
+      pausing.pause();
+      // Sync position
+      playing.currentTime = pausing.currentTime > 0.01 ? pausing.currentTime : 0;
+      setCompareSource(currentlyA ? 'A' : 'B');
 
-      toPause.pause();
-      // Sync position from the one that was playing
-      const pos = toPause.currentTime > 0 ? toPause.currentTime : startPos;
-      toPlay.currentTime = pos;
-      setCompareLabel(playingA ? 'A' : 'B');
+      const ok = await safePlay(playing);
+      if (!ok) return; // stop loop if play fails
 
-      toPlay.play().catch(() => {});
-
-      compareTimerRef.current = setTimeout(() => {
-        playingA = !playingA;
-        if (isPlayingRef.current) playNext();
+      compareTimerRef.current = window.setTimeout(() => {
+        currentlyA = !currentlyA;
+        runSegment();
       }, 3000);
     };
 
-    playNext();
-  }, []);
+    // Start from 0
+    orig.currentTime = 0;
+    proc.currentTime = 0;
+    setCurrentTime(0);
+    runSegment();
 
-  const togglePlay = useCallback(() => {
+    return () => {
+      pauseAll();
+    };
+  }, [playMode, isPlaying, safePlay, pauseAll]);
+
+  // ─── play/pause toggle ────────────────────
+
+  const togglePlay = useCallback(async () => {
     if (isPlaying) {
-      stopAll();
+      pauseAll();
+      setIsPlaying(false);
       return;
     }
 
     if (playMode === 'compare') {
-      startCompare();
+      // Just set isPlaying=true → the useEffect above starts the loop
+      setIsPlaying(true);
       return;
     }
 
+    // Normal mode
     const audio = playMode === 'processed' ? processedRef.current : originalRef.current;
     if (!audio) return;
 
-    // Reset to beginning if at end
-    if (audio.currentTime >= audio.duration - 0.1) {
+    // Reset if at end
+    if (audio.duration > 0 && audio.currentTime >= audio.duration - 0.1) {
       audio.currentTime = 0;
       setCurrentTime(0);
     }
 
-    audio.play().then(() => {
-      setIsPlaying(true);
-    }).catch((e) => {
-      console.warn('Audio play failed:', e.message);
+    const ok = await safePlay(audio);
+    setIsPlaying(ok);
+  }, [isPlaying, playMode, pauseAll, safePlay]);
+
+  // ─── ended handler ────────────────────────
+
+  useEffect(() => {
+    const handleEnded = () => {
+      pauseAll();
       setIsPlaying(false);
-    });
-  }, [isPlaying, playMode, stopAll, startCompare]);
+    };
+    const orig = originalRef.current;
+    const proc = processedRef.current;
+    orig?.addEventListener('ended', handleEnded);
+    proc?.addEventListener('ended', handleEnded);
+    return () => {
+      orig?.removeEventListener('ended', handleEnded);
+      proc?.removeEventListener('ended', handleEnded);
+    };
+  }, [originalUrl, processedUrl, pauseAll]);
+
+  // ─── seek ─────────────────────────────────
 
   const seekTo = (e: React.ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(e.target.value);
@@ -140,10 +171,10 @@ export default function AudioPreview({ originalUrl, processedUrl, originalFile, 
 
   const formatTime = (s: number) => {
     if (isNaN(s)) return '0:00';
-    const mins = Math.floor(s / 60);
-    const secs = Math.floor(s % 60);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
+    return Math.floor(s / 60) + ':' + Math.floor(s % 60).toString().padStart(2, '0');
   };
+
+  // ─── download ─────────────────────────────
 
   const downloadProcessed = () => {
     if (!processedBlob || !processedUrl) return;
@@ -159,53 +190,29 @@ export default function AudioPreview({ originalUrl, processedUrl, originalFile, 
 
   if (!originalUrl) return null;
 
-  const hasProcessed = !!processedUrl;
-
   const modeLabel = playMode === 'original' ? 'Originál'
     : playMode === 'processed' ? 'Vylepšená verze'
-    : `A/B srovnání (${compareLabel === 'A' ? 'Originál' : 'Vylepšená'})`;
+    : `A/B srovnání (${compareSource === 'A' ? 'Originál' : 'Vylepšená'})`;
 
   return (
     <div className="w-full max-w-xl mx-auto space-y-6">
-      {/* Hidden audio elements */}
       {originalUrl && <audio ref={originalRef} src={originalUrl} preload="auto" />}
       {processedUrl && <audio ref={processedRef} src={processedUrl} preload="auto" />}
 
-      {/* Playback mode toggle */}
       {hasProcessed && (
         <div className="join w-full">
-          <button
-            className={`join-item btn flex-1 ${playMode === 'original' ? 'btn-active' : ''}`}
-            onClick={() => setPlayMode('original')}
-          >
-            Originál
-          </button>
-          <button
-            className={`join-item btn flex-1 ${playMode === 'processed' ? 'btn-active' : ''}`}
-            onClick={() => setPlayMode('processed')}
-          >
-            Vylepšená
-          </button>
-          <button
-            className={`join-item btn flex-1 ${playMode === 'compare' ? 'btn-active' : ''}`}
-            onClick={() => setPlayMode('compare')}
-          >
-            A/B srovnání
-          </button>
+          <button className={`join-item btn flex-1 ${playMode === 'original' ? 'btn-active' : ''}`} onClick={() => setPlayMode('original')}>Originál</button>
+          <button className={`join-item btn flex-1 ${playMode === 'processed' ? 'btn-active' : ''}`} onClick={() => setPlayMode('processed')}>Vylepšená</button>
+          <button className={`join-item btn flex-1 ${playMode === 'compare' ? 'btn-active' : ''}`} onClick={() => setPlayMode('compare')}>A/B srovnání</button>
         </div>
       )}
 
-      {/* Now playing info */}
       <div className="text-center text-sm opacity-70">
         Přehrává se: <span className="font-semibold">{modeLabel}</span>
       </div>
 
-      {/* Controls */}
       <div className="flex items-center gap-4">
-        <button
-          onClick={togglePlay}
-          className="btn btn-circle btn-primary btn-lg"
-        >
+        <button onClick={togglePlay} className="btn btn-circle btn-primary btn-lg">
           {isPlaying ? (
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
               <rect x="6" y="4" width="4" height="16" rx="1" />
@@ -217,23 +224,13 @@ export default function AudioPreview({ originalUrl, processedUrl, originalFile, 
             </svg>
           )}
         </button>
-
         <div className="flex-1 flex items-center gap-3">
           <span className="text-xs opacity-60 tabular-nums">{formatTime(currentTime)}</span>
-          <input
-            type="range"
-            min={0}
-            max={duration || 0}
-            value={currentTime}
-            onChange={seekTo}
-            className="range range-xs flex-1"
-            step="0.1"
-          />
+          <input type="range" min={0} max={duration || 0} value={currentTime} onChange={seekTo} className="range range-xs flex-1" step="0.1" />
           <span className="text-xs opacity-60 tabular-nums">{formatTime(duration)}</span>
         </div>
       </div>
 
-      {/* Download button */}
       {hasProcessed && (
         <button onClick={downloadProcessed} className="btn btn-secondary w-full">
           <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
