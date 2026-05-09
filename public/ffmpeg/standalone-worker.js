@@ -61,9 +61,9 @@ async function loadFFmpegCore(cfg) {
 
   if (ffmpeg) return false;
 
-  // Load ffmpeg-core.js as an ES module — it uses import.meta internally
-  var coreModule = await import(/* @vite-ignore */ coreURL);
-  var createFFmpegCore = coreModule.default;
+  // Load ffmpeg-core.js (UMD) — it sets self.createFFmpegCore as side effect
+  await import(/* @vite-ignore */ coreURL);
+  var createFFmpegCore = self.createFFmpegCore;
 
   if (!createFFmpegCore) {
     throw new Error('Failed to load ffmpeg-core: createFFmpegCore not found');
