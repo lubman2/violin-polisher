@@ -165,12 +165,16 @@ export default function Home() {
             </div>
             <div className="mt-4 p-3 bg-base-200 rounded-lg">
               <p className="text-xs opacity-60">
-                🔄 Veškeré zpracování běží lokálně ve vašem prohlížeči pomocí FFmpeg.wasm. Zvuk nikdy neopouští vaše zařízení — žádný upload na server.
+                🔄 Veškeré zpracování běží lokálně ve vašem prohlížeči pomocí FFmpeg.wasm.
               </p>
             </div>
           </div>
         </section>
       </main>
+
+      <footer className="py-6 text-center text-xs opacity-40">
+        <p>© 2026 Lubman. Věnováno Markétce 🎻</p>
+      </footer>
     </div>
   );
 }
