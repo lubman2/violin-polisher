@@ -10,7 +10,7 @@ interface PresetSelectorProps {
 export default function PresetSelector({ presets, selectedId, onSelect }: PresetSelectorProps) {
   return (
     <div className="w-full max-w-xl mx-auto">
-      <h3 className="text-lg font-semibold mb-3">Choose a preset</h3>
+      <h3 className="text-lg font-semibold mb-3">Vyberte preset</h3>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {presets.map((preset) => (
           <button

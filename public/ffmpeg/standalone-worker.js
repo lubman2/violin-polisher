@@ -4,122 +4,96 @@
 
 /**
  * Standalone FFmpeg worker for violin-polisher.
- * Self-contained — no external ESM imports.
- * Uses importScripts to load UDM ffmpeg-core.
- * 
- * Messages: { id, type, data }
- * Types: LOAD, EXEC, WRITE_FILE, READ_FILE, DELETE_FILE, FFPROBE,
- *        RENAME, CREATE_DIR, LIST_DIR, DELETE_DIR, MOUNT, UNMOUNT, LOG, PROGRESS, ERROR
+ * Loaded as ES module worker ({ type: 'module' }).
+ * Uses dynamic import() to load ffmpeg-core (which needs import.meta).
  */
 
 let ffmpeg = null;
 
 const FFMessageType = {
-  LOAD: 'LOAD', EXEC: 'EXEC', FFPROBE: 'FFPROBE', WRITE_FILE: 'WRITE_FILE',
-  READ_FILE: 'READ_FILE', DELETE_FILE: 'DELETE_FILE', RENAME: 'RENAME',
-  CREATE_DIR: 'CREATE_DIR', LIST_DIR: 'LIST_DIR', DELETE_DIR: 'DELETE_DIR',
-  MOUNT: 'MOUNT', UNMOUNT: 'UNMOUNT', LOG: 'LOG', PROGRESS: 'PROGRESS', ERROR: 'ERROR',
+  LOAD: 'LOAD', EXEC: 'EXEC', WRITE_FILE: 'WRITE_FILE',
+  READ_FILE: 'READ_FILE', DELETE_FILE: 'DELETE_FILE',
+  LOG: 'LOG', PROGRESS: 'PROGRESS', ERROR: 'ERROR',
 };
 
-const ERROR_UNKNOWN = new Error('unknown message type');
-const ERROR_NOT_LOADED = new Error('ffmpeg not loaded');
-
-self.onmessage = async ({ data: { id, type, data: _data } }) => {
+self.onmessage = async function ({ data: { id, type, data: _data } }) {
   try {
-    if (type !== FFMessageType.LOAD && !ffmpeg) throw ERROR_NOT_LOADED;
-    let data;
+    if (type !== FFMessageType.LOAD && !ffmpeg) {
+      throw new Error('ffmpeg not loaded');
+    }
+    let result;
 
     switch (type) {
       case FFMessageType.LOAD:
-        data = await loadFFmpegCore(_data);
+        result = await loadFFmpegCore(_data);
         break;
       case FFMessageType.EXEC:
-        data = execFF(_data);
-        break;
-      case FFMessageType.FFPROBE:
-        data = ffprobeFF(_data);
+        result = execFF(_data);
         break;
       case FFMessageType.WRITE_FILE:
         ffmpeg.FS.writeFile(_data.path, _data.data);
-        data = true;
+        result = true;
         break;
       case FFMessageType.READ_FILE:
-        data = ffmpeg.FS.readFile(_data.path, { encoding: _data.encoding || 'binary' });
+        result = ffmpeg.FS.readFile(_data.path, { encoding: _data.encoding || 'binary' });
         break;
       case FFMessageType.DELETE_FILE:
-        ffmpeg.FS.unlink(_data.path);
-        data = true;
+        try { ffmpeg.FS.unlink(_data.path); } catch (e) {}
+        result = true;
         break;
       default:
-        throw ERROR_UNKNOWN;
+        throw new Error('unknown message type: ' + type);
     }
 
-    if (data instanceof Uint8Array) {
-      self.postMessage({ id, type, data }, [data.buffer]);
+    if (result instanceof Uint8Array) {
+      self.postMessage({ id, type, data: result }, [result.buffer]);
     } else {
-      self.postMessage({ id, type, data });
+      self.postMessage({ id, type, data: result });
     }
   } catch (e) {
-    self.postMessage({ id, type: FFMessageType.ERROR, data: e.toString() });
+    self.postMessage({ id, type: FFMessageType.ERROR, data: e.message || String(e) });
   }
 };
 
-async function loadFFmpegCore({ coreURL, wasmURL, workerURL }) {
+async function loadFFmpegCore(cfg) {
+  var coreURL = cfg.coreURL;
+  var wasmURL = cfg.wasmURL;
+
   if (ffmpeg) return false;
 
-  // Load UMD core via importScripts — exposes createFFmpegCore on self
-  if (!self.createFFmpegCore) {
-    try {
-      importScripts(coreURL);
-    } catch {
-      importScripts(coreURL.replace('/umd/', '/esm/'));
-    }
+  // Load ffmpeg-core.js as an ES module — it uses import.meta internally
+  var coreModule = await import(/* @vite-ignore */ coreURL);
+  var createFFmpegCore = coreModule.default;
+
+  if (!createFFmpegCore) {
+    throw new Error('Failed to load ffmpeg-core: createFFmpegCore not found');
   }
 
-  if (!self.createFFmpegCore) {
-    throw new Error('Failed to load ffmpeg-core');
+  if (!wasmURL) {
+    wasmURL = coreURL.replace(/\.js$/, '.wasm');
   }
 
-  const actualWasm = wasmURL || coreURL.replace(/.js$/, '.wasm');
-  const actualWorker = workerURL || coreURL.replace(/.js$/, '.worker.js');
-
-  ffmpeg = await self.createFFmpegCore({
-    mainScriptUrlOrBlob: `${coreURL}#${btoa(JSON.stringify({ wasmURL: actualWasm, workerURL: actualWorker }))}`,
+  ffmpeg = await createFFmpegCore({
+    mainScriptUrlOrBlob: coreURL + '#' + btoa(JSON.stringify({ wasmURL: wasmURL })),
   });
 
-  ffmpeg.setLogger = (cb) => {
-    const origSetLogger = ffmpeg.setLogger;
-    origSetLogger((data) => {
-      self.postMessage({ type: FFMessageType.LOG, data });
-    });
-  };
-
-  ffmpeg.setProgress = (cb) => {
-    const origSetProgress = ffmpeg.setProgress;
-    origSetProgress((data) => {
-      self.postMessage({ type: FFMessageType.PROGRESS, data });
-    });
-  };
-
-  // Register initial callbacks
-  ffmpeg.setLogger((data) => self.postMessage({ type: FFMessageType.LOG, data }));
-  ffmpeg.setProgress((data) => self.postMessage({ type: FFMessageType.PROGRESS, data }));
+  // Register callbacks for log/progress
+  ffmpeg.setLogger(function (data) {
+    self.postMessage({ type: FFMessageType.LOG, data: data });
+  });
+  ffmpeg.setProgress(function (data) {
+    self.postMessage({ type: FFMessageType.PROGRESS, data: data });
+  });
 
   return true;
 }
 
-function execFF({ args, timeout = -1 }) {
+function execFF(cfg) {
+  var args = cfg.args;
+  var timeout = cfg.timeout || -1;
   ffmpeg.setTimeout(timeout);
-  ffmpeg.exec(...args);
-  const ret = ffmpeg.ret;
-  ffmpeg.reset();
-  return ret;
-}
-
-function ffprobeFF({ args, timeout = -1 }) {
-  ffmpeg.setTimeout(timeout);
-  ffmpeg.ffprobe(...args);
-  const ret = ffmpeg.ret;
+  ffmpeg.exec.apply(ffmpeg, args);
+  var ret = ffmpeg.ret;
   ffmpeg.reset();
   return ret;
 }

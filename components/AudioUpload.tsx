@@ -12,7 +12,7 @@ export default function AudioUpload({ onFileSelect, selectedFile, fileUrl }: Aud
 
   const handleFile = useCallback((file: File) => {
     if (!file.type.startsWith('audio/')) {
-      alert('Please select an audio file (WAV, MP3, etc.)');
+      alert('Vyberte zvukový soubor (WAV, MP3 atd.).');
       return;
     }
     const url = URL.createObjectURL(file);
@@ -47,7 +47,7 @@ export default function AudioUpload({ onFileSelect, selectedFile, fileUrl }: Aud
         role="button"
         tabIndex={0}
         onKeyDown={(e) => e.key === 'Enter' && inputRef.current?.click()}
-        aria-label="Upload audio file"
+        aria-label="Nahrát zvukový soubor"
       >
         {selectedFile ? (
           <div className="space-y-3">
@@ -67,17 +67,17 @@ export default function AudioUpload({ onFileSelect, selectedFile, fileUrl }: Aud
               }}
               className="btn btn-sm btn-ghost mt-2"
             >
-              Remove & Choose Another
+              Odebrat a vybrat jiný
             </button>
           </div>
         ) : (
           <div className="space-y-3">
             <div className="text-4xl">🎻</div>
             <div>
-              <p className="font-semibold text-lg">Drop your violin recording here</p>
-              <p className="text-sm opacity-70">or click to browse</p>
+              <p className="font-semibold text-lg">Přetáhněte nahrávku houslí sem</p>
+              <p className="text-sm opacity-70">nebo klikněte pro výběr souboru</p>
             </div>
-            <p className="text-xs opacity-50">Supports WAV, MP3, FLAC, OGG</p>
+            <p className="text-xs opacity-50">Podporuje WAV, MP3, FLAC, OGG</p>
           </div>
         )}
         <input
