@@ -65,6 +65,16 @@ export default function AudioPreview({ originalUrl, processedUrl, originalFile, 
   // A/B compare engine
   const startCompare = useCallback(() => {
     if (!originalRef.current || !processedRef.current) return;
+
+    // Reset to beginning if at end
+    const orig = originalRef.current;
+    const proc = processedRef.current;
+    let startPos = orig.currentTime;
+    if (startPos >= orig.duration - 0.1) startPos = 0;
+
+    orig.currentTime = startPos;
+    proc.currentTime = startPos;
+    setCurrentTime(startPos);
     setIsPlaying(true);
 
     let playingA = true;
@@ -77,8 +87,9 @@ export default function AudioPreview({ originalUrl, processedUrl, originalFile, 
       if (!toPlay || !toPause) return;
 
       toPause.pause();
-      // Sync position
-      toPlay.currentTime = toPause.currentTime || currentTime;
+      // Sync position from the one that was playing
+      const pos = toPause.currentTime > 0 ? toPause.currentTime : startPos;
+      toPlay.currentTime = pos;
       setCompareLabel(playingA ? 'A' : 'B');
 
       toPlay.play().catch(() => {});
@@ -89,11 +100,8 @@ export default function AudioPreview({ originalUrl, processedUrl, originalFile, 
       }, 3000);
     };
 
-    // Start from current position
-    originalRef.current.currentTime = currentTime;
-    processedRef.current.currentTime = currentTime;
     playNext();
-  }, [currentTime]);
+  }, []);
 
   const togglePlay = useCallback(() => {
     if (isPlaying) {
@@ -108,6 +116,12 @@ export default function AudioPreview({ originalUrl, processedUrl, originalFile, 
 
     const audio = playMode === 'processed' ? processedRef.current : originalRef.current;
     if (!audio) return;
+
+    // Reset to beginning if at end
+    if (audio.currentTime >= audio.duration - 0.1) {
+      audio.currentTime = 0;
+      setCurrentTime(0);
+    }
 
     audio.play().then(() => {
       setIsPlaying(true);
