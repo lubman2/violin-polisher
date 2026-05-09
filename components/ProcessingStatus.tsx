@@ -142,7 +142,7 @@ export default function ProcessingStatus({
       console.log('[trace] exec return code:', execRet);
 
       // Trace: worker logs
-      const workerLogs = await ffmpeg.getLogs();
+      const workerLogs = await ffmpeg.getLogs() as unknown[];
       console.log('[trace] worker logs:', JSON.stringify(workerLogs?.slice?.(-10) ?? workerLogs));
 
       // Trace: file listing after exec
